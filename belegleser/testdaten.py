@@ -34,7 +34,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 
-from belegleser.schema import Position, Rechnung
+from belegleser.schema import Position, Rechnung, Steuerzeile
 
 CENT = Decimal("0.01")
 
@@ -76,35 +76,62 @@ def eur(betrag: Decimal) -> str:
     return f"{'-' if negativ else ''}{mit_punkten},{nach}"
 
 
-def erzeuge_rechnung(zufall: random.Random) -> Rechnung:
+def erzeuge_rechnung(zufall: random.Random, gemischt: bool | None = None) -> Rechnung:
     """Würfelt eine in sich stimmige Rechnung.
 
-    Die Reihenfolge ist wichtig: erst die Positionen, dann daraus Netto, USt
-    und Brutto ausrechnen. So kann per Konstruktion nichts unstimmig sein - und
-    genau deshalb ist das Ergebnis als Sollwert brauchbar.
+    Die Reihenfolge ist wichtig: erst die Positionen, dann daraus die
+    Steueraufschlüsselung, dann die Summen. So kann per Konstruktion nichts
+    unstimmig sein - und genau deshalb ist das Ergebnis als Sollwert brauchbar.
+
+    `gemischt` erzwingt mehrere Steuersätze auf einem Beleg. Ohne Angabe
+    entscheidet der Zufall; etwa jeder dritte Beleg wird gemischt. Das ist kein
+    Sonderfall, sondern Alltag - jede Hotelrechnung mit Frühstück und Getränken
+    sieht so aus.
     """
-    # Alle Positionen einer Rechnung teilen sich denselben Steuersatz. Gemischte
-    # Steuersaetze auf einem Beleg gibt es zwar, sie brauchen aber eine
-    # Aufschluesselung pro Satz - das hebe ich fuer spaeter auf.
-    satz = zufall.choice([Decimal("20"), Decimal("20"), Decimal("10"), Decimal("13")])
-    auswahl = [l for l in LEISTUNGEN if l[2] == satz]
-    anzahl = zufall.randint(1, 4)
+    if gemischt is None:
+        gemischt = zufall.random() < 0.35
+
+    if gemischt:
+        # Zwei verschiedene Saetze, jeweils ein bis zwei Positionen.
+        saetze = zufall.sample(sorted({l[2] for l in LEISTUNGEN}), k=2)
+        anzahl_je = [zufall.randint(1, 2) for _ in saetze]
+    else:
+        saetze = [zufall.choice([Decimal("20"), Decimal("20"), Decimal("10"), Decimal("13")])]
+        anzahl_je = [zufall.randint(1, 4)]
 
     positionen: list[Position] = []
-    for bezeichnung, preis, _ in zufall.sample(auswahl, k=min(anzahl, len(auswahl))):
-        menge = Decimal(zufall.randint(1, 12))
-        gesamt = (menge * preis).quantize(CENT, rounding=ROUND_HALF_UP)
-        positionen.append(
-            Position(
-                bezeichnung=bezeichnung,
-                menge=menge,
-                einzelpreis=preis,
-                gesamtpreis=gesamt,
+    for satz, anzahl in zip(saetze, anzahl_je):
+        auswahl = [l for l in LEISTUNGEN if l[2] == satz]
+        for bezeichnung, preis, _ in zufall.sample(auswahl, k=min(anzahl, len(auswahl))):
+            menge = Decimal(zufall.randint(1, 12))
+            gesamt = (menge * preis).quantize(CENT, rounding=ROUND_HALF_UP)
+            positionen.append(
+                Position(
+                    bezeichnung=bezeichnung,
+                    menge=menge,
+                    einzelpreis=preis,
+                    gesamtpreis=gesamt,
+                    ust_satz=satz,
+                )
+            )
+
+    steuerzeilen: list[Steuerzeile] = []
+    for satz in sorted({p.ust_satz for p in positionen}):
+        netto_satz = sum(
+            (p.gesamtpreis for p in positionen if p.ust_satz == satz), start=Decimal("0")
+        ).quantize(CENT)
+        steuerzeilen.append(
+            Steuerzeile(
+                satz=satz,
+                nettobetrag=netto_satz,
+                ust_betrag=(netto_satz * satz / Decimal("100")).quantize(
+                    CENT, rounding=ROUND_HALF_UP
+                ),
             )
         )
 
-    netto = sum((p.gesamtpreis for p in positionen), start=Decimal("0")).quantize(CENT)
-    ust = (netto * satz / Decimal("100")).quantize(CENT, rounding=ROUND_HALF_UP)
+    netto = sum((z.nettobetrag for z in steuerzeilen), start=Decimal("0")).quantize(CENT)
+    ust = sum((z.ust_betrag for z in steuerzeilen), start=Decimal("0")).quantize(CENT)
     brutto = (netto + ust).quantize(CENT)
 
     # Kleinbetragsrechnungen bis 400 Euro brauchen keine UID des Lieferanten.
@@ -118,8 +145,8 @@ def erzeuge_rechnung(zufall: random.Random) -> Rechnung:
         lieferant_name=zufall.choice(LIEFERANTEN),
         lieferant_uid=uid,
         positionen=positionen,
+        steuerzeilen=steuerzeilen,
         nettobetrag=netto,
-        ust_satz=satz,
         ust_betrag=ust,
         bruttobetrag=brutto,
     )
@@ -159,11 +186,16 @@ def schreibe_pdf(rechnung: Rechnung, pfad: Path, zufall: random.Random) -> None:
     c.drawString(20 * mm, y, f"{zufall.choice(BESCHRIFTUNG_DATUM)}: {datum}")
     y -= 12 * mm
 
-    # Tabellenkopf
+    mehrere_saetze = len(rechnung.steuerzeilen) > 1
+
+    # Tabellenkopf. Die Spalte "USt" erscheint nur, wenn es mehrere Saetze gibt -
+    # so halten es echte Belege auch.
     c.setFont("Helvetica-Bold", 9)
     c.drawString(20 * mm, y, "Bezeichnung")
-    c.drawRightString(120 * mm, y, "Menge")
-    c.drawRightString(150 * mm, y, "Einzelpreis")
+    c.drawRightString(112 * mm, y, "Menge")
+    c.drawRightString(142 * mm, y, "Einzelpreis")
+    if mehrere_saetze:
+        c.drawRightString(158 * mm, y, "USt")
     c.drawRightString(180 * mm, y, "Gesamt")
     y -= 2 * mm
     c.line(20 * mm, y, 180 * mm, y)
@@ -172,8 +204,10 @@ def schreibe_pdf(rechnung: Rechnung, pfad: Path, zufall: random.Random) -> None:
     c.setFont("Helvetica", 9)
     for p in rechnung.positionen:
         c.drawString(20 * mm, y, p.bezeichnung)
-        c.drawRightString(120 * mm, y, str(int(p.menge)))
-        c.drawRightString(150 * mm, y, eur(p.einzelpreis))
+        c.drawRightString(112 * mm, y, str(int(p.menge)))
+        c.drawRightString(142 * mm, y, eur(p.einzelpreis))
+        if mehrere_saetze and p.ust_satz is not None:
+            c.drawRightString(158 * mm, y, f"{int(p.ust_satz)} %")
         c.drawRightString(180 * mm, y, eur(p.gesamtpreis))
         y -= 5 * mm
 
@@ -181,10 +215,29 @@ def schreibe_pdf(rechnung: Rechnung, pfad: Path, zufall: random.Random) -> None:
     c.line(110 * mm, y, 180 * mm, y)
     y -= 6 * mm
 
+    if mehrere_saetze:
+        # Steueraufschluesselung, wie sie das UStG bei mehreren Saetzen verlangt.
+        c.setFont("Helvetica-Bold", 9)
+        c.drawRightString(180 * mm, y, "Steueraufschlüsselung")
+        y -= 5 * mm
+        c.setFont("Helvetica", 9)
+        for z in rechnung.steuerzeilen:
+            c.drawRightString(
+                180 * mm,
+                y,
+                f"netto {eur(z.nettobetrag)}   {int(z.satz)} % USt   {eur(z.ust_betrag)}",
+            )
+            y -= 5 * mm
+        y -= 2 * mm
+
+    c.setFont("Helvetica", 9)
     c.drawRightString(150 * mm, y, "Nettobetrag")
     c.drawRightString(180 * mm, y, eur(rechnung.nettobetrag))
     y -= 5 * mm
-    c.drawRightString(150 * mm, y, f"USt {int(rechnung.ust_satz)} %")
+    beschriftung = (
+        "USt gesamt" if mehrere_saetze else f"USt {int(rechnung.steuerzeilen[0].satz)} %"
+    )
+    c.drawRightString(150 * mm, y, beschriftung)
     c.drawRightString(180 * mm, y, eur(rechnung.ust_betrag))
     y -= 6 * mm
     c.setFont("Helvetica-Bold", 10)

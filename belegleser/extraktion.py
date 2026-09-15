@@ -100,8 +100,13 @@ Die Felder und wo sie üblicherweise stehen:
 - lieferant_uid: die UID-Nummer des Lieferanten, beginnt mit ATU und steht
   meist direkt unter dem Firmennamen. Nur auf null setzen, wenn im Beleg
   wirklich keine steht.
-- positionen: die Zeilen der Leistungstabelle
-- nettobetrag, ust_satz, ust_betrag, bruttobetrag: die Summen darunter.
+- positionen: die Zeilen der Leistungstabelle. Steht in der Tabelle eine
+  USt-Spalte, gehört ihr Wert als ust_satz zur jeweiligen Zeile.
+- steuerzeilen: die Steueraufschlüsselung. Auf Belegen mit mehreren Sätzen
+  steht sie als eigener Block ("netto 530,70  10 % USt  53,07"). Hat der Beleg
+  nur einen Satz, gib trotzdem genau eine Steuerzeile zurück - mit dem
+  Nettobetrag der Rechnung, dem Satz und dem Steuerbetrag.
+- nettobetrag, ust_betrag, bruttobetrag: die Gesamtsummen darunter.
   Der Bruttobetrag ist als "Gesamtbetrag" oder "Rechnungsbetrag" beschriftet.
 
 Regeln:

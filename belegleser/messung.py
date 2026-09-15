@@ -46,7 +46,6 @@ EINZELFELDER = [
     "lieferant_name",
     "lieferant_uid",
     "nettobetrag",
-    "ust_satz",
     "ust_betrag",
     "bruttobetrag",
 ]
@@ -218,6 +217,17 @@ def vergleiche(ergebnis: Ergebnis, soll: Rechnung) -> Belegmessung:
             ist=[
                 (p.bezeichnung, p.menge, p.gesamtpreis) for p in ergebnis.rechnung.positionen
             ],
+        )
+    )
+    # Die Steueraufschluesselung ebenso. Nach Satz sortiert, weil die
+    # Reihenfolge auf dem Beleg nichts bedeutet.
+    messung.vergleiche.append(
+        Feldvergleich(
+            feld="steuerzeilen",
+            soll=sorted((z.satz, z.nettobetrag, z.ust_betrag) for z in soll.steuerzeilen),
+            ist=sorted(
+                (z.satz, z.nettobetrag, z.ust_betrag) for z in ergebnis.rechnung.steuerzeilen
+            ),
         )
     )
     return messung

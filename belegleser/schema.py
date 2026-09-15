@@ -91,6 +91,10 @@ class Position(BaseModel):
     menge: Betrag = Field(gt=0)
     einzelpreis: Betrag = Field(ge=0)
     gesamtpreis: Betrag = Field(ge=0)
+    # Der Satz, der für diese Zeile gilt. Auf Belegen mit nur einem Satz steht
+    # er meist nicht an der Zeile - dann bleibt das Feld leer und der Satz
+    # ergibt sich aus der Steueraufschlüsselung.
+    ust_satz: Betrag | None = None
 
     @model_validator(mode="after")
     def zeile_rechnet_auf(self) -> Position:
@@ -99,6 +103,42 @@ class Position(BaseModel):
             raise ValueError(
                 f"Position '{self.bezeichnung}': {self.menge} × {self.einzelpreis} "
                 f"ergibt {erwartet}, auf dem Beleg steht {self.gesamtpreis}"
+            )
+        return self
+
+
+class Steuerzeile(BaseModel):
+    """Eine Zeile der Steueraufschlüsselung.
+
+    Österreichische Rechnungen mit mehreren Steuersätzen weisen die Steuer je
+    Satz getrennt aus:
+
+        Netto 20 %     800,00     USt     160,00
+        Netto 13 %     196,00     USt      25,48
+
+    Genau das bildet diese Klasse ab - und macht damit den Beleg nachrechenbar,
+    statt ihn auf einen Satz zu vereinfachen, den er nicht hat.
+    """
+
+    satz: Betrag = Field(ge=0, le=100)
+    nettobetrag: Betrag = Field(ge=0)
+    ust_betrag: Betrag = Field(ge=0)
+
+    @field_validator("satz")
+    @classmethod
+    def satz_ist_gueltig(cls, wert: Decimal) -> Decimal:
+        if wert not in GUELTIGE_UST_SAETZE:
+            gueltige = ", ".join(str(s) for s in sorted(GUELTIGE_UST_SAETZE))
+            raise ValueError(f"{wert} % ist kein gültiger USt-Satz (erlaubt: {gueltige})")
+        return wert
+
+    @model_validator(mode="after")
+    def steuer_rechnet_auf(self) -> Steuerzeile:
+        erwartet = (self.nettobetrag * self.satz / Decimal("100")).quantize(CENT)
+        if abs(erwartet - self.ust_betrag.quantize(CENT)) > CENT:
+            raise ValueError(
+                f"Steuerzeile {self.satz} %: {self.nettobetrag} ergibt {erwartet} USt, "
+                f"auf dem Beleg steht {self.ust_betrag}"
             )
         return self
 
@@ -118,12 +158,19 @@ class Rechnung(BaseModel):
     lieferant_uid: str | None = None
 
     positionen: list[Position] = Field(min_length=1)
+    # Die Steueraufschlüsselung. Bei einem einzigen Satz enthält sie genau
+    # einen Eintrag - der Sonderfall bleibt damit ein Fall der Regel.
+    steuerzeilen: list[Steuerzeile] = Field(min_length=1)
 
     nettobetrag: Betrag = Field(ge=0)
-    ust_satz: Betrag = Field(ge=0, le=100)
     ust_betrag: Betrag = Field(ge=0)
     bruttobetrag: Betrag = Field(ge=0)
     waehrung: str = "EUR"
+
+    @property
+    def ust_saetze(self) -> list[Decimal]:
+        """Die vorkommenden Steuersätze, aufsteigend."""
+        return sorted(z.satz for z in self.steuerzeilen)
 
     @field_validator("lieferant_uid")
     @classmethod
@@ -136,14 +183,6 @@ class Rechnung(BaseModel):
                 f"'{wert}' ist keine österreichische UID-Nummer (erwartet: ATU + 8 Ziffern)"
             )
         return bereinigt
-
-    @field_validator("ust_satz")
-    @classmethod
-    def ust_satz_ist_gueltig(cls, wert: Decimal) -> Decimal:
-        if wert not in GUELTIGE_UST_SAETZE:
-            gueltige = ", ".join(str(s) for s in sorted(GUELTIGE_UST_SAETZE))
-            raise ValueError(f"{wert} % ist kein gültiger USt-Satz (erlaubt: {gueltige})")
-        return wert
 
     @model_validator(mode="after")
     def betraege_rechnen_auf(self) -> Rechnung:
@@ -164,13 +203,46 @@ class Rechnung(BaseModel):
                 f"Positionen ergeben {summe_positionen}, Nettobetrag lautet {netto}"
             )
 
-        erwartete_ust = (netto * self.ust_satz / Decimal("100")).quantize(CENT)
-        ust = self.ust_betrag.quantize(CENT)
-        if abs(erwartete_ust - ust) > CENT:
+        # Die Aufschlüsselung muss in Summe den Gesamtbetrag ergeben - sonst
+        # fehlt eine Steuerzeile oder eine wurde doppelt gelesen.
+        summe_zeilen_netto = sum(
+            (z.nettobetrag for z in self.steuerzeilen), start=Decimal("0")
+        ).quantize(CENT)
+        if abs(summe_zeilen_netto - netto) > CENT:
             fehler.append(
-                f"{netto} bei {self.ust_satz} % USt ergibt {erwartete_ust}, "
-                f"auf dem Beleg steht {ust}"
+                f"Steueraufschlüsselung ergibt netto {summe_zeilen_netto}, "
+                f"Nettobetrag lautet {netto}"
             )
+
+        ust = self.ust_betrag.quantize(CENT)
+        summe_zeilen_ust = sum(
+            (z.ust_betrag for z in self.steuerzeilen), start=Decimal("0")
+        ).quantize(CENT)
+        if abs(summe_zeilen_ust - ust) > CENT:
+            fehler.append(
+                f"Steueraufschlüsselung ergibt {summe_zeilen_ust} USt, "
+                f"ausgewiesen sind {ust}"
+            )
+
+        # Jeder Satz darf nur einmal vorkommen. Zwei Zeilen mit 20 % bedeuten,
+        # dass eine Zeile doppelt gelesen wurde.
+        saetze = [z.satz for z in self.steuerzeilen]
+        if len(saetze) != len(set(saetze)):
+            fehler.append("Ein Steuersatz kommt in der Aufschlüsselung mehrfach vor")
+
+        # Wo die Positionen ihren Satz mitbringen, lässt sich die
+        # Aufschlüsselung Zeile für Zeile gegenprüfen.
+        if all(p.ust_satz is not None for p in self.positionen):
+            for zeile in self.steuerzeilen:
+                summe = sum(
+                    (p.gesamtpreis for p in self.positionen if p.ust_satz == zeile.satz),
+                    start=Decimal("0"),
+                ).quantize(CENT)
+                if abs(summe - zeile.nettobetrag.quantize(CENT)) > CENT:
+                    fehler.append(
+                        f"Positionen mit {zeile.satz} % ergeben {summe}, "
+                        f"die Aufschlüsselung nennt {zeile.nettobetrag}"
+                    )
 
         brutto = self.bruttobetrag.quantize(CENT)
         if abs((netto + ust) - brutto) > CENT:

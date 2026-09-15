@@ -42,6 +42,63 @@ def finde_uids(text: str) -> list[str]:
     return list(dict.fromkeys(gefunden))
 
 
+def _steht_woertlich_im_beleg(wert: str, text: str) -> bool:
+    """Kommt die Zeichenkette genau so im Beleg vor?
+
+    Bewusst ohne Vereinheitlichung des Leerraums. Genau der trägt hier die
+    Information: Der Belegtext ist spaltenweise ausgerichtet, zwischen zwei
+    Spalten stehen mehrere Leerzeichen. "Übersetzung DE-EN, Seite 11" mit
+    einem Leerzeichen kann deshalb nicht aus einer Zeile stammen, in der
+    Bezeichnung und Menge zwei verschiedene Spalten sind.
+    """
+    return wert in text
+
+
+def bereinige_bezeichnungen(rechnung: Rechnung, text: str) -> tuple[Rechnung, list[str]]:
+    """Entfernt die Menge, wenn sie an der Bezeichnung klebt.
+
+    Beobachtet in der Messung: Aus
+
+        Übersetzung DE-EN, Seite        11      55,00     605,00
+
+    wurde die Bezeichnung "Übersetzung DE-EN, Seite 11". Menge und Beträge
+    stimmten - nur der Text hatte die Zahl aus der Nachbarspalte angehängt.
+
+    Warum hier korrigiert werden darf und es kein Raten ist: Geprüft wird
+    gegen den Belegtext. Steht die Bezeichnung mit angehängter Zahl dort nicht
+    wörtlich, ohne die Zahl aber schon, dann stammt die Zahl aus einer anderen
+    Spalte. Eine Bezeichnung, die tatsächlich auf eine Zahl endet - etwa
+    "Fachbuch Band 3" - steht so im Beleg und bleibt unangetastet.
+    """
+    ergaenzt: list[str] = []
+    neue_positionen = []
+    geaendert = False
+
+    for position in rechnung.positionen:
+        bezeichnung = position.bezeichnung
+        menge_als_text = str(int(position.menge)) if position.menge == int(position.menge) else None
+
+        if (
+            menge_als_text
+            and bezeichnung.endswith(" " + menge_als_text)
+            and not _steht_woertlich_im_beleg(bezeichnung, text)
+        ):
+            ohne_menge = bezeichnung[: -(len(menge_als_text) + 1)].rstrip()
+            if ohne_menge and _steht_woertlich_im_beleg(ohne_menge, text):
+                position = position.model_copy(update={"bezeichnung": ohne_menge})
+                ergaenzt.append(
+                    f"Bezeichnung bereinigt: '{bezeichnung}' -> '{ohne_menge}' "
+                    "(Menge aus der Nachbarspalte war angehängt)"
+                )
+                geaendert = True
+
+        neue_positionen.append(position)
+
+    if geaendert:
+        rechnung = rechnung.model_copy(update={"positionen": neue_positionen})
+    return rechnung, ergaenzt
+
+
 def bessere_nach(rechnung: Rechnung, text: str) -> tuple[Rechnung, list[str]]:
     """Setzt ein, was sich aus dem Beleg sicher ableiten lässt.
 
@@ -51,6 +108,9 @@ def bessere_nach(rechnung: Rechnung, text: str) -> tuple[Rechnung, list[str]]:
     damit die Leistung des Modells falsch.
     """
     ergaenzt: list[str] = []
+
+    rechnung, bereinigt = bereinige_bezeichnungen(rechnung, text)
+    ergaenzt.extend(bereinigt)
 
     if rechnung.lieferant_uid is None:
         uids = finde_uids(text)

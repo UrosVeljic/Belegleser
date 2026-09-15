@@ -19,8 +19,8 @@ GUTE_ANTWORT = {
     "positionen": [
         {"bezeichnung": "Beratung", "menge": 2, "einzelpreis": 150.00, "gesamtpreis": 300.00}
     ],
+    "steuerzeilen": [{"satz": 20, "nettobetrag": 300.00, "ust_betrag": 60.00}],
     "nettobetrag": 300.00,
-    "ust_satz": 20,
     "ust_betrag": 60.00,
     "bruttobetrag": 360.00,
 }
@@ -80,7 +80,12 @@ def test_fehlendes_pflichtfeld_landet_in_der_warteschlange():
 
 def test_deutscher_ust_satz_wird_abgelehnt():
     # Ein Modell, das viel deutschen Text gesehen hat, setzt gerne 19 %.
-    daten = dict(GUTE_ANTWORT, ust_satz=19, ust_betrag=57.00, bruttobetrag=357.00)
+    daten = dict(
+        GUTE_ANTWORT,
+        steuerzeilen=[{"satz": 19, "nettobetrag": 300.00, "ust_betrag": 57.00}],
+        ust_betrag=57.00,
+        bruttobetrag=357.00,
+    )
     ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(daten))
     assert ergebnis.braucht_pruefung
     assert any("USt-Satz" in b for b in ergebnis.befunde)
@@ -176,3 +181,43 @@ def test_belegtreue_stoert_gueltige_belege_nicht():
     ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(GUTE_ANTWORT))
     assert ergebnis.status == "ok"
     assert ergebnis.befunde == []
+
+
+def test_angehaengte_menge_wird_aus_der_bezeichnung_entfernt():
+    """Beobachtet in der Messung: Das Modell haengt die Menge aus der
+    Nachbarspalte an die Bezeichnung.
+
+    Geprueft wird gegen den Belegtext: Der ist spaltenweise ausgerichtet, also
+    kann "Beratung 2" mit einem Leerzeichen nicht aus einer Zeile stammen, in
+    der Bezeichnung und Menge verschiedene Spalten sind.
+    """
+    daten = dict(
+        GUTE_ANTWORT,
+        positionen=[
+            {"bezeichnung": "Beratung 2", "menge": 2, "einzelpreis": 150.00,
+             "gesamtpreis": 300.00}
+        ],
+    )
+    ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(daten))
+
+    assert ergebnis.status == "ok"
+    assert ergebnis.rechnung.positionen[0].bezeichnung == "Beratung"
+    assert any("bereinigt" in e for e in ergebnis.ergaenzungen)
+
+
+def test_bezeichnung_die_echt_auf_eine_zahl_endet_bleibt():
+    """Gegenprobe: 'Fachbuch Band 3' steht so im Beleg und darf nicht
+    beschnitten werden."""
+    text = BELEGTEXT.replace(
+        "Beratung          2      150,00     300,00",
+        "Fachbuch Band 3          2      150,00     300,00",
+    )
+    daten = dict(
+        GUTE_ANTWORT,
+        positionen=[
+            {"bezeichnung": "Fachbuch Band 3", "menge": 2, "einzelpreis": 150.00,
+             "gesamtpreis": 300.00}
+        ],
+    )
+    ergebnis = verarbeite_text(text, attrappe_mit(daten))
+    assert ergebnis.rechnung.positionen[0].bezeichnung == "Fachbuch Band 3"
