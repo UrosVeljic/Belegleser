@@ -1,0 +1,14 @@
+# Virtuelle Umgebung
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Erzeugte Testbelege - lassen sich jederzeit aus dem Startwert neu erzeugen,
+# gehoeren also nicht in die Versionierung.
+testsatz/
+
+# Zugangsdaten
+.env

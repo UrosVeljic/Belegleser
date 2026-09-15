@@ -1,0 +1,9 @@
+[project]
+name = "belegleser"
+version = "0.1.0"
+description = "Belege in geprueftes JSON umwandeln - mit Nachrechnung statt Vertrauen"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
