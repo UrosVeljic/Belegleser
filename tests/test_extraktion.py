@@ -25,7 +25,17 @@ GUTE_ANTWORT = {
     "bruttobetrag": 360.00,
 }
 
-BELEGTEXT = "Muster GmbH\nRechnungsnummer: 2026-0042\nBeratung 2 150,00 300,00"
+# Der Text muss die Werte enthalten, die die Attrappe zurueckgibt - sonst
+# meldet die Belegtreue-Pruefung sie zu Recht als erfunden.
+BELEGTEXT = (
+    "Muster GmbH\n"
+    "UID: ATU12345678\n"
+    "Rechnungsnummer: 2026-0042\n"
+    "Beratung          2      150,00     300,00\n"
+    "Nettobetrag 300,00\n"
+    "USt 20 % 60,00\n"
+    "Gesamtbetrag 360,00 EUR"
+)
 
 
 def attrappe_mit(daten) -> Attrappe:
@@ -108,3 +118,61 @@ def test_messwerte_werden_durchgereicht():
     ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(GUTE_ANTWORT))
     assert ergebnis.antwort is not None
     assert ergebnis.antwort.modell == "attrappe"
+
+
+# --- Belegtreue ------------------------------------------------------------
+
+
+def test_erfundene_rechnungsnummer_wird_erkannt():
+    """Der Gegenspieler zur Nachrechnung.
+
+    Eine Rechnungsnummer haengt mit keinem anderen Feld zusammen - die
+    Nachrechnung kann sie nicht pruefen. Was man pruefen kann: ob sie im Beleg
+    ueberhaupt vorkommt.
+    """
+    daten = dict(GUTE_ANTWORT, rechnungsnummer="9999-0001")
+    ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(daten))
+
+    assert ergebnis.braucht_pruefung
+    assert any("kommt im Beleg nicht vor" in b for b in ergebnis.befunde)
+
+
+def test_uebersehene_uid_wird_aus_dem_beleg_ergaenzt():
+    """Was ein striktes Format hat, findet man selbst.
+
+    Eine oesterreichische UID ist ATU plus acht Ziffern. Uebersieht das Modell
+    sie, wird sie eingesetzt - das ist kein Raten, sondern eine Ableitung aus
+    dem Beleg.
+    """
+    daten = {k: v for k, v in GUTE_ANTWORT.items() if k != "lieferant_uid"}
+    ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(daten))
+
+    assert ergebnis.status == "ok"
+    assert ergebnis.rechnung.lieferant_uid == "ATU12345678"
+    assert any("ergänzt" in e for e in ergebnis.ergaenzungen)
+
+
+def test_ergaenzung_wird_protokolliert():
+    """Sonst liesse sich die Leistung des Modells nicht mehr von der der
+    Nachbesserung trennen."""
+    daten = {k: v for k, v in GUTE_ANTWORT.items() if k != "lieferant_uid"}
+    ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(daten))
+    assert ergebnis.ergaenzungen != []
+
+
+def test_mehrere_uids_werden_nicht_geraten():
+    """Stehen zwei UIDs auf dem Beleg - Lieferant und Empfaenger - ist nicht
+    entscheidbar, welche gemeint ist. Dann wird nichts eingesetzt."""
+    text = BELEGTEXT + "\nEmpfaenger UID: ATU87654321"
+    daten = {k: v for k, v in GUTE_ANTWORT.items() if k != "lieferant_uid"}
+    ergebnis = verarbeite_text(text, attrappe_mit(daten))
+
+    assert ergebnis.braucht_pruefung
+    assert ergebnis.rechnung.lieferant_uid is None
+    assert any("nicht gelesen" in b for b in ergebnis.befunde)
+
+
+def test_belegtreue_stoert_gueltige_belege_nicht():
+    ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(GUTE_ANTWORT))
+    assert ergebnis.status == "ok"
+    assert ergebnis.befunde == []

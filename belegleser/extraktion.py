@@ -23,6 +23,7 @@ from typing import Literal
 import pdfplumber
 from pydantic import ValidationError
 
+from belegleser.belegtreue import bessere_nach, pruefe_belegtreue
 from belegleser.modell import Antwort, Modell
 from belegleser.schema import Rechnung
 
@@ -38,6 +39,10 @@ class Ergebnis:
     rechnung: Rechnung | None = None
     befunde: list[str] = field(default_factory=list)
     antwort: Antwort | None = None
+    # Was nicht vom Modell kam, sondern deterministisch aus dem Beleg ergänzt
+    # wurde. Ohne diese Liste liesse sich die Leistung des Modells nicht mehr
+    # von der Leistung der Nachbesserung trennen.
+    ergaenzungen: list[str] = field(default_factory=list)
 
     @property
     def braucht_pruefung(self) -> bool:
@@ -45,7 +50,22 @@ class Ergebnis:
 
 
 def pdf_zu_text(pfad: Path) -> str:
-    """Liest den Text aus einem PDF.
+    """Liest den Text aus einem PDF und erhält dabei die Spalten.
+
+    `layout=True` ist hier der entscheidende Teil. Ohne diesen Schalter legt
+    pdfplumber alle Spalten einer Tabellenzeile zu einer Zeichenkette zusammen:
+
+        Übersetzung DE-EN, Seite 2 55,00 110,00
+
+    Wo die Bezeichnung aufhört und die Menge beginnt, ist darin nicht mehr
+    erkennbar - in der ersten Messung hat das Modell genau hier alles um eine
+    Spalte verschoben und Menge 55 statt 2 gelesen. Mit layout=True bleiben die
+    Spalten durch Leerzeichen getrennt:
+
+        Übersetzung DE-EN, Seite     2      55,00    110,00
+
+    Das ist der Unterschied zwischen "das Modell liest schlecht" und "wir haben
+    ihm die Struktur weggenommen, bevor es lesen konnte".
 
     Funktioniert nur bei PDFs mit einer Textebene - also bei allem, was aus
     einem Programm heraus erzeugt wurde. Eingescannte Belege sind Bilder und
@@ -53,16 +73,43 @@ def pdf_zu_text(pfad: Path) -> str:
     bewusst noch nicht enthalten.
     """
     with pdfplumber.open(pfad) as pdf:
-        seiten = [seite.extract_text() or "" for seite in pdf.pages]
-    return "\n".join(seiten).strip()
+        seiten = [seite.extract_text(layout=True) or "" for seite in pdf.pages]
+    return _entschlacke("\n".join(seiten))
+
+
+def _entschlacke(text: str) -> str:
+    """Entfernt Leerraum, der keine Information trägt.
+
+    layout=True füllt die ganze Seitenbreite mit Leerzeichen auf. Die Einrückung
+    am Zeilenanfang trägt die Spaltenstruktur und bleibt deshalb stehen; alles
+    nach dem letzten Zeichen und die leeren Zeilen dazwischen kosten nur Tokens.
+    """
+    zeilen = [z.rstrip() for z in text.split("\n")]
+    behalten = [z for z in zeilen if z.strip()]
+    return "\n".join(behalten).strip()
 
 
 ANWEISUNG = """Du liest österreichische Rechnungen und gibst die Felder als JSON zurück.
 
+Die Felder und wo sie üblicherweise stehen:
+
+- rechnungsnummer: beschriftet als "Rechnungsnummer", "Rechnungs-Nr.", "RE-Nr."
+  oder "Beleg-Nr."
+- rechnungsdatum: beschriftet als "Rechnungsdatum", "Datum" oder "Belegdatum"
+- lieferant_name: der ausstellende Betrieb, meist ganz oben
+- lieferant_uid: die UID-Nummer des Lieferanten, beginnt mit ATU und steht
+  meist direkt unter dem Firmennamen. Nur auf null setzen, wenn im Beleg
+  wirklich keine steht.
+- positionen: die Zeilen der Leistungstabelle
+- nettobetrag, ust_satz, ust_betrag, bruttobetrag: die Summen darunter.
+  Der Bruttobetrag ist als "Gesamtbetrag" oder "Rechnungsbetrag" beschriftet.
+
 Regeln:
 - Gib ausschließlich Werte zurück, die im Beleg stehen. Rechne nichts aus und
   ergänze nichts.
-- Steht ein Feld nicht auf dem Beleg, lass es weg oder setze es auf null.
+- Die Tabelle ist in Spalten ausgerichtet: Bezeichnung, Menge, Einzelpreis,
+  Gesamt. Die Bezeichnung kann Ziffern und Beistriche enthalten - trenn die
+  Spalten am Leerraum, nicht am letzten Wort.
 - Beträge in deutscher Schreibweise (1.234,56) bedeuten: Punkt trennt Tausender,
   Komma trennt die Nachkommastellen. Gib sie als Zahl mit Punkt zurück: 1234.56
 - Das Datum im Format JJJJ-MM-TT.
@@ -115,7 +162,31 @@ def verarbeite_text(text: str, modell: Modell, quelle: Path | None = None) -> Er
             antwort=antwort,
         )
 
-    return Ergebnis(quelle=quelle, status="ok", rechnung=rechnung, antwort=antwort)
+    # Erst nachbessern, was sich sicher aus dem Beleg ableiten laesst ...
+    rechnung, ergaenzungen = bessere_nach(rechnung, text)
+
+    # ... dann pruefen, ob die uebrigen Werte ueberhaupt im Beleg vorkommen.
+    # Die Nachrechnung im Schema kann das nicht: Sie prueft nur Werte, die
+    # miteinander zusammenhaengen. Eine erfundene Rechnungsnummer haengt mit
+    # nichts zusammen und geht dort still durch.
+    befunde = pruefe_belegtreue(rechnung, text)
+    if befunde:
+        return Ergebnis(
+            quelle=quelle,
+            status="pruefen",
+            rechnung=rechnung,
+            befunde=befunde,
+            antwort=antwort,
+            ergaenzungen=ergaenzungen,
+        )
+
+    return Ergebnis(
+        quelle=quelle,
+        status="ok",
+        rechnung=rechnung,
+        antwort=antwort,
+        ergaenzungen=ergaenzungen,
+    )
 
 
 def verarbeite_pdf(pfad: Path, modell: Modell) -> Ergebnis:

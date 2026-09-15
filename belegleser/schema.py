@@ -23,6 +23,8 @@ from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic.functional_validators import BeforeValidator
+from typing import Annotated
 
 # Beträge werden auf den Cent genau verglichen. Ein Cent Abweichung lassen wir
 # durchgehen: Auf echten Belegen wird pro Position gerundet, die Summe weicht
@@ -38,13 +40,57 @@ UID_MUSTER = re.compile(r"^ATU\d{8}$")
 GUELTIGE_UST_SAETZE = {Decimal("0"), Decimal("10"), Decimal("13"), Decimal("20")}
 
 
+def deutsche_zahl(wert: object) -> object:
+    """Nimmt Betraege in deutscher wie englischer Schreibweise entgegen.
+
+    Das Sprachmodell wird angewiesen, Zahlen mit Punkt zu liefern. Es haelt
+    sich nicht daran - in derselben Antwort standen "98,00" und "1107.40"
+    nebeneinander. Eine Anweisung ist eine Bitte, keine Garantie.
+
+    Statt die Bitte zu wiederholen, wird hier umgewandelt. Das ist
+    deterministisch, kostet nichts und ist im Gegensatz zum Modellverhalten
+    testbar.
+
+    Die Regeln, bewusst einfach gehalten:
+
+        "1.234,56"  Komma vorhanden -> Komma trennt die Nachkommastellen,
+                                       Punkte sind Tausendertrennzeichen
+        "1.234.567" kein Komma, mehrere Punkte -> alles Tausendertrennzeichen
+        "1234.56"   kein Komma, ein Punkt -> Punkt trennt die Nachkommastellen
+
+    Der letzte Fall ist theoretisch mehrdeutig: "1.234" koennte deutsch
+    Tausend-zweihundertvierunddreissig meinen. Wir lesen es als 1,234 - so
+    wuerde es auch JSON meinen. Sollte das im Einzelfall falsch sein, faellt es
+    auf: Die Nachrechnung von Positionen, Netto und Brutto geht dann nicht mehr
+    auf, und der Beleg landet in der Warteschlange statt still in der
+    Buchhaltung.
+    """
+    if not isinstance(wert, str):
+        return wert
+
+    text = wert.strip().replace("\u00a0", "").replace(" ", "")
+    if not text:
+        return wert
+    text = text.removeprefix("EUR").removeprefix("\u20ac").strip()
+
+    if "," in text:
+        return text.replace(".", "").replace(",", ".")
+    if text.count(".") > 1:
+        return text.replace(".", "")
+    return text
+
+
+# Ein Decimal, das auch deutsche Schreibweise entgegennimmt.
+Betrag = Annotated[Decimal, BeforeValidator(deutsche_zahl)]
+
+
 class Position(BaseModel):
     """Eine einzelne Zeile auf der Rechnung."""
 
     bezeichnung: str = Field(min_length=1)
-    menge: Decimal = Field(gt=0)
-    einzelpreis: Decimal = Field(ge=0)
-    gesamtpreis: Decimal = Field(ge=0)
+    menge: Betrag = Field(gt=0)
+    einzelpreis: Betrag = Field(ge=0)
+    gesamtpreis: Betrag = Field(ge=0)
 
     @model_validator(mode="after")
     def zeile_rechnet_auf(self) -> Position:
@@ -73,10 +119,10 @@ class Rechnung(BaseModel):
 
     positionen: list[Position] = Field(min_length=1)
 
-    nettobetrag: Decimal = Field(ge=0)
-    ust_satz: Decimal = Field(ge=0, le=100)
-    ust_betrag: Decimal = Field(ge=0)
-    bruttobetrag: Decimal = Field(ge=0)
+    nettobetrag: Betrag = Field(ge=0)
+    ust_satz: Betrag = Field(ge=0, le=100)
+    ust_betrag: Betrag = Field(ge=0)
+    bruttobetrag: Betrag = Field(ge=0)
     waehrung: str = "EUR"
 
     @field_validator("lieferant_uid")
