@@ -23,7 +23,7 @@ from typing import Literal
 import pdfplumber
 from pydantic import ValidationError
 
-from belegleser.belegtreue import bessere_nach, pruefe_belegtreue
+from belegleser.belegtreue import bessere_nach, pruefe_belegtreue, vorbessere
 from belegleser.modell import Antwort, Modell
 from belegleser.schema import Rechnung
 
@@ -106,6 +106,14 @@ Die Felder und wo sie üblicherweise stehen:
   steht sie als eigener Block ("netto 530,70  10 % USt  53,07"). Hat der Beleg
   nur einen Satz, gib trotzdem genau eine Steuerzeile zurück - mit dem
   Nettobetrag der Rechnung, dem Satz und dem Steuerbetrag.
+- rabatt: ein Abzug zwischen Zwischensumme und Nettobetrag, beschriftet als
+  "Rabatt", "Mengenrabatt" oder "Kundenrabatt". betrag ist immer positiv und
+  meint die Höhe des Abzugs - das Minuszeichen auf dem Beleg gehört zur
+  Darstellung, nicht in die Daten. Gibt es keinen Abzug, lass das Feld weg.
+- skonto: die Zahlungsbedingung, etwa "3 % Skonto bei Zahlung binnen 14 Tagen".
+  WICHTIG: Skonto wird NICHT abgezogen. Es ist eine Bedingung für später, keine
+  Minderung der Rechnung. Übernimm die Prozentzahl und die Tage unverändert und
+  lass alle Beträge so, wie sie auf dem Beleg stehen.
 - nettobetrag, ust_betrag, bruttobetrag: die Gesamtsummen darunter.
   Der Bruttobetrag ist als "Gesamtbetrag" oder "Rechnungsbetrag" beschriftet.
 
@@ -157,6 +165,11 @@ def verarbeite_text(text: str, modell: Modell, quelle: Path | None = None) -> Er
             antwort=antwort,
         )
 
+    # Vor der Pruefung das reparieren, was rechnerisch feststeht. Manche Fehler
+    # verhindern sonst, dass ueberhaupt ein gueltiges Objekt entsteht - dann
+    # kaeme die Nachbesserung weiter unten gar nicht mehr zum Zug.
+    roh, vorab = vorbessere(roh, text)
+
     try:
         rechnung = Rechnung.model_validate(roh)
     except ValidationError as fehler:
@@ -165,10 +178,12 @@ def verarbeite_text(text: str, modell: Modell, quelle: Path | None = None) -> Er
             status="pruefen",
             befunde=_lesbare_befunde(fehler),
             antwort=antwort,
+            ergaenzungen=vorab,
         )
 
     # Erst nachbessern, was sich sicher aus dem Beleg ableiten laesst ...
     rechnung, ergaenzungen = bessere_nach(rechnung, text)
+    ergaenzungen = vorab + ergaenzungen
 
     # ... dann pruefen, ob die uebrigen Werte ueberhaupt im Beleg vorkommen.
     # Die Nachrechnung im Schema kann das nicht: Sie prueft nur Werte, die

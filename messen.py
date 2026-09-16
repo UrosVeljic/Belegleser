@@ -27,9 +27,14 @@ def main() -> int:
     p.add_argument("--modell", default="qwen2.5:7b", help="Name des Ollama-Modells")
     p.add_argument("--startwert", type=int, default=42, help="Zufallsstartwert des Testsatzes")
     p.add_argument("--ordner", type=Path, default=Path("testsatz"))
+    p.add_argument(
+        "--ohne-schema",
+        action="store_true",
+        help="Schema nicht erzwingen - schneller, aber das Modell kann ungueltiges JSON liefern",
+    )
     args = p.parse_args()
 
-    modell = Ollama(modell=args.modell)
+    modell = Ollama(modell=args.modell, schema_erzwingen=not args.ohne_schema)
     if not modell.erreichbar():
         print("Ollama antwortet nicht. Laeuft der Dienst?", file=sys.stderr)
         return 1
@@ -44,8 +49,19 @@ def main() -> int:
     print(f"Erzeuge {args.anzahl} Belege (Startwert {args.startwert}) ...")
     testsatz = erzeuge_testsatz(args.anzahl, args.ordner, startwert=args.startwert)
 
-    print(f"Lese sie mit {args.modell} ...")
-    bericht = miss(testsatz, modell)
+    print(f"Lese sie mit {args.modell} ...", flush=True)
+
+    def zeige(nummer, gesamt, messung):
+        marke = "ok     " if messung.status == "ok" else "pruefen"
+        if messung.status == "ok" and not messung.alle_felder_richtig:
+            marke = "still! "
+        print(
+            f"  [{nummer:>2}/{gesamt}] {messung.quelle.name}  {marke}  "
+            f"{messung.dauer_ms/1000:.1f}s",
+            flush=True,
+        )
+
+    bericht = miss(testsatz, modell, fortschritt=zeige)
 
     # Ausgabe ueber sys.stdout mit erzwungenem UTF-8: Die Windows-Konsole
     # steht sonst auf einer Codepage, die an Umlauten scheitert.

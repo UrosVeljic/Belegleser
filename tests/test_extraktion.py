@@ -221,3 +221,99 @@ def test_bezeichnung_die_echt_auf_eine_zahl_endet_bleibt():
     )
     ergebnis = verarbeite_text(text, attrappe_mit(daten))
     assert ergebnis.rechnung.positionen[0].bezeichnung == "Fachbuch Band 3"
+
+
+# --- Vorbesserung ----------------------------------------------------------
+
+RABATT_TEXT = (
+    "Grosshandel Wien GmbH\n"
+    "UID: ATU12345678\n"
+    "Rechnungsnummer: 2026-0042\n"
+    "Ware              10      100,00   1.000,00\n"
+    "Zwischensumme  1.000,00\n"
+    "Rabatt 10 %      -100,00\n"
+    "Nettobetrag      900,00\n"
+    "USt 20 %         180,00\n"
+    "Gesamtbetrag  1.080,00 EUR"
+)
+
+RABATT_ANTWORT = {
+    "rechnungsnummer": "2026-0042",
+    "rechnungsdatum": "2026-03-14",
+    "lieferant_name": "Grosshandel Wien GmbH",
+    "lieferant_uid": "ATU12345678",
+    "positionen": [
+        {"bezeichnung": "Ware", "menge": 10, "einzelpreis": 100.00, "gesamtpreis": 1000.00}
+    ],
+    "steuerzeilen": [{"satz": 20, "nettobetrag": 900.00, "ust_betrag": 180.00}],
+    "nettobetrag": 900.00,
+    "ust_betrag": 180.00,
+    "bruttobetrag": 1080.00,
+}
+
+
+def test_uebersehener_rabatt_wird_errechnet():
+    """Beobachtet in der Messung: Das Modell liest den verminderten
+    Nettobetrag richtig, uebernimmt den Abzug darueber aber nicht.
+
+    Die Hoehe ist reine Arithmetik - Positionssumme minus Netto. Abgesichert
+    wird sie dreifach: Die Luecke muss positiv sein, im Beleg muss ein
+    Abzugswort stehen, und der errechnete Betrag muss dort auftauchen.
+    """
+    ergebnis = verarbeite_text(RABATT_TEXT, attrappe_mit(RABATT_ANTWORT))
+
+    assert ergebnis.status == "ok"
+    assert ergebnis.rechnung.rabatt is not None
+    assert str(ergebnis.rechnung.rabatt.betrag) == "100.00"
+    assert any("aus der Differenz" in e for e in ergebnis.ergaenzungen)
+
+
+def test_rabatt_mit_betrag_null_wird_entfernt():
+    """Manche Modelle druecken 'kein Rabatt' als Betrag 0 aus, statt das Feld
+    wegzulassen. Ohne Vorbesserung scheitert daran die Schemapruefung."""
+    daten = dict(GUTE_ANTWORT, rabatt={"bezeichnung": "Rabatt", "betrag": 0})
+    ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(daten))
+
+    assert ergebnis.status == "ok"
+    assert ergebnis.rechnung.rabatt is None
+    assert any("Betrag 0 entfernt" in e for e in ergebnis.ergaenzungen)
+
+
+def test_ohne_abzugswort_wird_nichts_erfunden():
+    """Gegenprobe. Passt die Summe nicht und steht im Beleg kein Abzugswort,
+    ist es ein Lesefehler - der gehoert in die Warteschlange, nicht zugedeckt."""
+    text = RABATT_TEXT.replace("Rabatt 10 %      -100,00\n", "")
+    ergebnis = verarbeite_text(text, attrappe_mit(RABATT_ANTWORT))
+
+    assert ergebnis.braucht_pruefung
+    assert any("Positionen ergeben" in b for b in ergebnis.befunde)
+
+
+def test_betrag_muss_im_beleg_stehen():
+    """Zweite Gegenprobe: Das Wort 'Rabatt' allein genuegt nicht - der
+    errechnete Betrag muss im Beleg auch vorkommen."""
+    text = RABATT_TEXT.replace("-100,00", "-99,00")
+    ergebnis = verarbeite_text(text, attrappe_mit(RABATT_ANTWORT))
+    assert ergebnis.braucht_pruefung
+
+
+def test_zusammengesetzte_rabattwoerter_werden_erkannt():
+    """Deutsche Belege schreiben 'Kundenrabatt', nicht 'Rabatt'.
+
+    Die erste Fassung suchte mit Wortgrenzen nach 'rabatt' und fand davon
+    keines - die Reparatur griff nur bei Belegen, auf denen schlicht 'Rabatt'
+    stand. In der Messung waren das drei von zwoelf Belegen.
+    """
+    for wort in ["Kundenrabatt", "Mengenrabatt", "Sonderrabatt", "Nachlass"]:
+        text = RABATT_TEXT.replace("Rabatt 10 %", f"{wort} 10 %")
+        ergebnis = verarbeite_text(text, attrappe_mit(RABATT_ANTWORT))
+        assert ergebnis.status == "ok", f"{wort} wurde nicht erkannt"
+        assert ergebnis.rechnung.rabatt is not None
+
+
+def test_skonto_gilt_nicht_als_abzug():
+    """Gegenprobe: Skonto ist keine Minderung. Steht nur Skonto im Beleg und
+    die Summe passt nicht, ist es ein Lesefehler."""
+    text = RABATT_TEXT.replace("Rabatt 10 %      -100,00", "3 % Skonto binnen 14 Tagen")
+    ergebnis = verarbeite_text(text, attrappe_mit(RABATT_ANTWORT))
+    assert ergebnis.braucht_pruefung

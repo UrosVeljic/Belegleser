@@ -212,3 +212,72 @@ def test_schema_laesst_sich_als_json_schema_ausgeben():
     schema = Rechnung.model_json_schema()
     assert "rechnungsnummer" in schema["properties"]
     assert "positionen" in schema["properties"]
+
+
+# --- Rabatt und Skonto -----------------------------------------------------
+
+
+def mit_rabatt(**abweichungen):
+    """1.000,00 minus 10 % Rabatt = 900,00 netto, 20 % USt = 180,00."""
+    grund = dict(
+        rechnungsnummer="2026-0200",
+        rechnungsdatum="2026-06-01",
+        lieferant_name="Grosshandel Wien GmbH",
+        positionen=[
+            {"bezeichnung": "Ware", "menge": "10", "einzelpreis": "100.00",
+             "gesamtpreis": "1000.00"},
+        ],
+        rabatt={"bezeichnung": "Mengenrabatt", "prozent": "10", "betrag": "100.00"},
+        steuerzeilen=[{"satz": "20", "nettobetrag": "900.00", "ust_betrag": "180.00"}],
+        nettobetrag="900.00",
+        ust_betrag="180.00",
+        bruttobetrag="1080.00",
+    )
+    grund.update(abweichungen)
+    return grund
+
+
+def test_rabatt_geht_durch():
+    r = Rechnung(**mit_rabatt())
+    assert r.rabatt.betrag == Decimal("100.00")
+    assert r.nettobetrag == Decimal("900.00")
+
+
+def test_rabatt_muss_zur_prozentangabe_passen():
+    # 10 % von 1.000 sind 100, nicht 150.
+    daten = mit_rabatt(
+        rabatt={"bezeichnung": "Rabatt", "prozent": "10", "betrag": "150.00"},
+        steuerzeilen=[{"satz": "20", "nettobetrag": "850.00", "ust_betrag": "170.00"}],
+        nettobetrag="850.00", ust_betrag="170.00", bruttobetrag="1020.00",
+    )
+    with pytest.raises(ValidationError, match="Rabatt 10 % auf"):
+        Rechnung(**daten)
+
+
+def test_vergessener_rabatt_wird_erkannt():
+    """Der Abzug steht auf dem Beleg, wurde aber nicht gelesen."""
+    daten = mit_rabatt(rabatt=None)
+    with pytest.raises(ValidationError, match="Positionen ergeben"):
+        Rechnung(**daten)
+
+
+def test_faelschlich_abgezogenes_skonto_wird_erkannt():
+    """Der wichtigste Test dieses Abschnitts.
+
+    Skonto ist eine Zahlungsbedingung, keine Minderung. Zieht ein Extraktor es
+    trotzdem ab - hier 3 % von 900 -, passt die Rechenkette nicht mehr. Ohne
+    Nachrechnung ginge das durch jede Formatpruefung.
+    """
+    daten = mit_rabatt(
+        skonto={"prozent": "3", "tage": "14"},
+        steuerzeilen=[{"satz": "20", "nettobetrag": "873.00", "ust_betrag": "174.60"}],
+        nettobetrag="873.00", ust_betrag="174.60", bruttobetrag="1047.60",
+    )
+    with pytest.raises(ValidationError, match="minus Rabatt"):
+        Rechnung(**daten)
+
+
+def test_skonto_aendert_die_summen_nicht():
+    r = Rechnung(**mit_rabatt(skonto={"prozent": "3", "tage": "14"}))
+    assert r.bruttobetrag == Decimal("1080.00")
+    assert r.skonto.tage == 14

@@ -34,7 +34,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 
-from belegleser.schema import Position, Rechnung, Steuerzeile
+from belegleser.schema import Position, Rabatt, Rechnung, Skonto, Steuerzeile
 
 CENT = Decimal("0.01")
 
@@ -115,11 +115,35 @@ def erzeuge_rechnung(zufall: random.Random, gemischt: bool | None = None) -> Rec
                 )
             )
 
+    summe_positionen = sum(
+        (p.gesamtpreis for p in positionen), start=Decimal("0")
+    ).quantize(CENT)
+
+    # Rabatt nur auf Belegen mit einem Steuersatz. Bei mehreren müsste der
+    # Abzug auf die Sätze aufgeteilt werden, und wie das geschieht, steht auf
+    # echten Belegen selten dabei - das ist ein eigener Fall für später.
+    rabatt = None
+    if len(set(saetze)) == 1 and zufall.random() < 0.55:
+        prozent = Decimal(zufall.choice([3, 5, 10, 15]))
+        betrag = (summe_positionen * prozent / Decimal("100")).quantize(
+            CENT, rounding=ROUND_HALF_UP
+        )
+        rabatt = Rabatt(
+            bezeichnung=zufall.choice(["Rabatt", "Mengenrabatt", "Kundenrabatt"]),
+            prozent=prozent,
+            betrag=betrag,
+        )
+
+    abzug = rabatt.betrag if rabatt else Decimal("0")
+
     steuerzeilen: list[Steuerzeile] = []
     for satz in sorted({p.ust_satz for p in positionen}):
         netto_satz = sum(
             (p.gesamtpreis for p in positionen if p.ust_satz == satz), start=Decimal("0")
         ).quantize(CENT)
+        # Bei einem Satz trifft der Abzug diesen einen; mehr Sätze mit Rabatt
+        # entstehen oben gar nicht erst.
+        netto_satz = (netto_satz - abzug).quantize(CENT)
         steuerzeilen.append(
             Steuerzeile(
                 satz=satz,
@@ -134,6 +158,12 @@ def erzeuge_rechnung(zufall: random.Random, gemischt: bool | None = None) -> Rec
     ust = sum((z.ust_betrag for z in steuerzeilen), start=Decimal("0")).quantize(CENT)
     brutto = (netto + ust).quantize(CENT)
 
+    # Skonto ist unabhängig vom Rabatt und wird NICHT abgezogen - es ist eine
+    # Bedingung für die Zahlung, keine Minderung der Rechnung.
+    skonto = None
+    if zufall.random() < 0.25:
+        skonto = Skonto(prozent=Decimal(zufall.choice([2, 3])), tage=zufall.choice([7, 14, 30]))
+
     # Kleinbetragsrechnungen bis 400 Euro brauchen keine UID des Lieferanten.
     uid = None if brutto < Decimal("400") and zufall.random() < 0.5 else (
         f"ATU{zufall.randint(10_000_000, 99_999_999)}"
@@ -146,6 +176,8 @@ def erzeuge_rechnung(zufall: random.Random, gemischt: bool | None = None) -> Rec
         lieferant_uid=uid,
         positionen=positionen,
         steuerzeilen=steuerzeilen,
+        rabatt=rabatt,
+        skonto=skonto,
         nettobetrag=netto,
         ust_betrag=ust,
         bruttobetrag=brutto,
@@ -231,6 +263,20 @@ def schreibe_pdf(rechnung: Rechnung, pfad: Path, zufall: random.Random) -> None:
         y -= 2 * mm
 
     c.setFont("Helvetica", 9)
+    if rechnung.rabatt is not None:
+        zwischensumme = sum(
+            (p.gesamtpreis for p in rechnung.positionen), start=Decimal("0")
+        )
+        c.drawRightString(150 * mm, y, "Zwischensumme")
+        c.drawRightString(180 * mm, y, eur(zwischensumme))
+        y -= 5 * mm
+        beschriftung_rabatt = rechnung.rabatt.bezeichnung
+        if rechnung.rabatt.prozent is not None:
+            beschriftung_rabatt += f" {int(rechnung.rabatt.prozent)} %"
+        c.drawRightString(150 * mm, y, beschriftung_rabatt)
+        c.drawRightString(180 * mm, y, f"-{eur(rechnung.rabatt.betrag)}")
+        y -= 5 * mm
+
     c.drawRightString(150 * mm, y, "Nettobetrag")
     c.drawRightString(180 * mm, y, eur(rechnung.nettobetrag))
     y -= 5 * mm
@@ -243,6 +289,18 @@ def schreibe_pdf(rechnung: Rechnung, pfad: Path, zufall: random.Random) -> None:
     c.setFont("Helvetica-Bold", 10)
     c.drawRightString(150 * mm, y, "Gesamtbetrag")
     c.drawRightString(180 * mm, y, f"{eur(rechnung.bruttobetrag)} EUR")
+
+    # Der Skontohinweis steht als Zahlungsbedingung unter dem Betrag - nicht
+    # in der Rechenkette. Wer ihn abzieht, liest den Beleg falsch.
+    if rechnung.skonto is not None:
+        y -= 10 * mm
+        c.setFont("Helvetica", 8)
+        c.drawString(
+            20 * mm,
+            y,
+            f"Zahlungsbedingung: {int(rechnung.skonto.prozent)} % Skonto bei Zahlung "
+            f"binnen {rechnung.skonto.tage} Tagen, sonst netto 30 Tage.",
+        )
 
     c.showPage()
     c.save()

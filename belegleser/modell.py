@@ -100,12 +100,18 @@ class Ollama:
         self,
         modell: str = "qwen2.5:7b",
         host: str = "http://127.0.0.1:11434",
-        zeitlimit: int = 180,
+        zeitlimit: int = 300,
         temperatur: float = 0.0,
+        schema_erzwingen: bool = True,
     ):
         self.name = modell
         self._host = host.rstrip("/")
         self._zeitlimit = zeitlimit
+        # Die Grammatik, die Ollama aus dem JSON-Schema baut, kostet Rechenzeit -
+        # und zwar ueberproportional, je verschachtelter das Schema ist. Ob sich
+        # das lohnt, ist eine Messfrage, keine Geschmacksfrage. Deshalb ein
+        # Schalter statt einer festen Entscheidung.
+        self._schema_erzwingen = schema_erzwingen
         # Temperatur 0: Bei einer Extraktionsaufgabe gibt es eine richtige
         # Antwort. Kreativitaet ist hier kein Vorteil, sondern eine Fehlerquelle -
         # und sie macht Messungen unreproduzierbar.
@@ -130,7 +136,7 @@ class Ollama:
             "stream": False,
             "options": {"temperature": self._temperatur},
         }
-        if json_schema is not None:
+        if json_schema is not None and self._schema_erzwingen:
             rumpf["format"] = json_schema
 
         anfrage = urllib.request.Request(

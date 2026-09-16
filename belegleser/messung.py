@@ -32,7 +32,7 @@ import statistics
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from belegleser.extraktion import Ergebnis, verarbeite_pdf
 from belegleser.modell import Modell
@@ -233,10 +233,22 @@ def vergleiche(ergebnis: Ergebnis, soll: Rechnung) -> Belegmessung:
     return messung
 
 
-def miss(testsatz: list[tuple[Path, Rechnung]], modell: Modell) -> Bericht:
-    """Laesst das Modell auf den Testsatz los und vergleicht gegen die Sollwerte."""
+def miss(
+    testsatz: list[tuple[Path, Rechnung]],
+    modell: Modell,
+    fortschritt: Callable[[int, int, Belegmessung], None] | None = None,
+) -> Bericht:
+    """Laesst das Modell auf den Testsatz los und vergleicht gegen die Sollwerte.
+
+     wird nach jedem Beleg aufgerufen. Bei zwanzig Belegen und
+    zehn Sekunden Rechenzeit je Beleg sitzt man sonst drei Minuten vor einem
+    stummen Fenster und weiss nicht, ob es laeuft oder haengt.
+    """
     messungen = []
-    for pfad, soll in testsatz:
+    for nummer, (pfad, soll) in enumerate(testsatz, start=1):
         ergebnis = verarbeite_pdf(pfad, modell)
-        messungen.append(vergleiche(ergebnis, soll))
+        messung = vergleiche(ergebnis, soll)
+        messungen.append(messung)
+        if fortschritt:
+            fortschritt(nummer, len(testsatz), messung)
     return Bericht(messungen=messungen)

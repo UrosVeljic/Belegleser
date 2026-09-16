@@ -107,6 +107,42 @@ class Position(BaseModel):
         return self
 
 
+class Rabatt(BaseModel):
+    """Ein Abzug, der den Nettobetrag mindert.
+
+    Auf dem Beleg steht er zwischen Positionssumme und Nettobetrag:
+
+        Zwischensumme                 1.000,00
+        Rabatt 10 %                    -100,00
+        Nettobetrag                     900,00
+
+    `betrag` ist immer positiv und meint die Höhe des Abzugs - nicht den
+    verminderten Betrag. Ein Minuszeichen auf dem Beleg gehört zur Darstellung,
+    nicht in die Daten.
+    """
+
+    bezeichnung: str = Field(min_length=1, default="Rabatt")
+    prozent: Betrag | None = Field(default=None, ge=0, le=100)
+    betrag: Betrag = Field(gt=0)
+
+
+class Skonto(BaseModel):
+    """Eine Zahlungsbedingung - kein Abzug.
+
+    "3 % Skonto bei Zahlung binnen 14 Tagen" mindert den Rechnungsbetrag
+    nicht. Ob der Abzug je zustande kommt, entscheidet sich erst bei der
+    Zahlung.
+
+    Hier steht es, damit sichtbar bleibt, dass es gelesen und bewusst nicht
+    verrechnet wurde. Ein Extraktor, der Skonto stillschweigend abzieht, macht
+    aus jeder Rechnung einen zu kleinen Betrag - und faellt dabei durch keine
+    Formatpruefung.
+    """
+
+    prozent: Betrag = Field(gt=0, le=100)
+    tage: int = Field(gt=0)
+
+
 class Steuerzeile(BaseModel):
     """Eine Zeile der Steueraufschlüsselung.
 
@@ -162,6 +198,10 @@ class Rechnung(BaseModel):
     # einen Eintrag - der Sonderfall bleibt damit ein Fall der Regel.
     steuerzeilen: list[Steuerzeile] = Field(min_length=1)
 
+    rabatt: Rabatt | None = None
+    # Wird bewusst nicht in die Summen eingerechnet - siehe Klasse Skonto.
+    skonto: Skonto | None = None
+
     nettobetrag: Betrag = Field(ge=0)
     ust_betrag: Betrag = Field(ge=0)
     bruttobetrag: Betrag = Field(ge=0)
@@ -198,10 +238,27 @@ class Rechnung(BaseModel):
             (p.gesamtpreis for p in self.positionen), start=Decimal("0")
         ).quantize(CENT)
         netto = self.nettobetrag.quantize(CENT)
-        if abs(summe_positionen - netto) > CENT:
-            fehler.append(
-                f"Positionen ergeben {summe_positionen}, Nettobetrag lautet {netto}"
-            )
+        abzug = self.rabatt.betrag.quantize(CENT) if self.rabatt else Decimal("0")
+
+        if abs((summe_positionen - abzug) - netto) > CENT:
+            if self.rabatt:
+                fehler.append(
+                    f"Positionen ergeben {summe_positionen} minus Rabatt {abzug} "
+                    f"= {summe_positionen - abzug}, Nettobetrag lautet {netto}"
+                )
+            else:
+                fehler.append(
+                    f"Positionen ergeben {summe_positionen}, Nettobetrag lautet {netto}"
+                )
+
+        # Ist der Rabatt in Prozent ausgewiesen, muss der Betrag dazu passen.
+        if self.rabatt and self.rabatt.prozent is not None:
+            erwartet = (summe_positionen * self.rabatt.prozent / Decimal("100")).quantize(CENT)
+            if abs(erwartet - abzug) > CENT:
+                fehler.append(
+                    f"Rabatt {self.rabatt.prozent} % auf {summe_positionen} ergibt "
+                    f"{erwartet}, ausgewiesen sind {abzug}"
+                )
 
         # Die Aufschlüsselung muss in Summe den Gesamtbetrag ergeben - sonst
         # fehlt eine Steuerzeile oder eine wurde doppelt gelesen.
@@ -231,8 +288,11 @@ class Rechnung(BaseModel):
             fehler.append("Ein Steuersatz kommt in der Aufschlüsselung mehrfach vor")
 
         # Wo die Positionen ihren Satz mitbringen, lässt sich die
-        # Aufschlüsselung Zeile für Zeile gegenprüfen.
-        if all(p.ust_satz is not None for p in self.positionen):
+        # Aufschlüsselung Zeile für Zeile gegenprüfen. Bei einem Rabatt geht
+        # das nicht ohne Weiteres: Er verteilt sich auf die Sätze, und wie
+        # genau, steht auf dem Beleg nicht immer. Diese Prüfung entfällt dann -
+        # die Summenprüfungen darüber greifen weiterhin.
+        if self.rabatt is None and all(p.ust_satz is not None for p in self.positionen):
             for zeile in self.steuerzeilen:
                 summe = sum(
                     (p.gesamtpreis for p in self.positionen if p.ust_satz == zeile.satz),

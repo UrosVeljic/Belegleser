@@ -24,8 +24,19 @@ prüfen, was übrig bleibt.
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation
 
-from belegleser.schema import Rechnung
+from belegleser.schema import Rechnung, deutsche_zahl
+
+# Bewusst OHNE Wortgrenzen. Deutsche Belege schreiben "Kundenrabatt",
+# "Mengenrabatt" oder "Sonderrabatt" - mit einer Wortgrenze davor findet man
+# davon keines, weil ein Wortzeichen vorangeht. Genau daran ist die Reparatur
+# zuerst gescheitert: Sie griff nur bei Belegen, auf denen schlicht "Rabatt"
+# stand - in der Messung drei von zwoelf.
+#
+# "Skonto" steht absichtlich nicht in der Liste. Es ist kein Abzug, sondern
+# eine Zahlungsbedingung.
+RABATT_WORT = re.compile(r"(rabatt|nachlass|abzug)", re.IGNORECASE)
 
 UID_IM_TEXT = re.compile(r"\bATU\s?\d{8}\b", re.IGNORECASE)
 
@@ -97,6 +108,94 @@ def bereinige_bezeichnungen(rechnung: Rechnung, text: str) -> tuple[Rechnung, li
     if geaendert:
         rechnung = rechnung.model_copy(update={"positionen": neue_positionen})
     return rechnung, ergaenzt
+
+
+def _als_betrag(wert: object) -> Decimal | None:
+    if wert is None:
+        return None
+    try:
+        return Decimal(str(deutsche_zahl(wert)))
+    except (InvalidOperation, ValueError, ArithmeticError):
+        return None
+
+
+def _deutsch(betrag: Decimal) -> str:
+    """1234.56 -> '1.234,56' - zum Nachschlagen im Belegtext."""
+    ganz, _, nach = f"{betrag:.2f}".partition(".")
+    return f"{int(ganz):,}".replace(",", ".") + "," + nach
+
+
+def _abzugszeile(text: str, betrag: Decimal) -> bool:
+    """Gibt es eine Zeile, die ein Abzugswort UND genau diesen Betrag enthält?
+
+    Die Einschränkung auf eine Zeile ist der Kern. Ein Betrag, der irgendwo im
+    Beleg vorkommt, beweist nichts - er könnte ein Einzelpreis sein. Erst das
+    Zusammentreffen mit "Rabatt" in derselben Zeile macht daraus einen Abzug.
+    """
+    gesucht = _deutsch(betrag)
+    for zeile in text.splitlines():
+        if RABATT_WORT.search(zeile) and gesucht in zeile:
+            return True
+    return False
+
+
+def vorbessere(roh: dict, text: str) -> tuple[dict, list[str]]:
+    """Repariert den Rohdatensatz, bevor er geprüft wird.
+
+    Arbeitet bewusst auf dem Wörterbuch, nicht auf dem Modell: Die Fehler, um
+    die es hier geht, verhindern gerade, dass ein gültiges Objekt entsteht.
+
+    Beide Eingriffe sind Rechnungen, keine Vermutungen - und der zweite wird
+    zusätzlich gegen den Belegtext abgesichert.
+    """
+    if not isinstance(roh, dict):
+        return roh, []
+
+    ergaenzt: list[str] = []
+    roh = dict(roh)
+
+    # 1) "Kein Rabatt" als Betrag null statt als fehlendes Feld.
+    rabatt = roh.get("rabatt")
+    if isinstance(rabatt, dict):
+        betrag = _als_betrag(rabatt.get("betrag"))
+        if betrag is not None and betrag <= 0:
+            roh.pop("rabatt")
+            ergaenzt.append("Rabatt mit Betrag 0 entfernt - das heißt: kein Rabatt")
+            rabatt = None
+
+    # 2) Abzug fehlt, obwohl die Zahlen ihn verlangen.
+    if not roh.get("rabatt"):
+        positionen = roh.get("positionen")
+        netto = _als_betrag(roh.get("nettobetrag"))
+        if isinstance(positionen, list) and positionen and netto is not None:
+            summe = Decimal("0")
+            vollstaendig = True
+            for p in positionen:
+                wert = _als_betrag(p.get("gesamtpreis")) if isinstance(p, dict) else None
+                if wert is None:
+                    vollstaendig = False
+                    break
+                summe += wert
+
+            if vollstaendig:
+                luecke = (summe - netto).quantize(Decimal("0.01"))
+                # Nur wenn die Luecke positiv ist, im Beleg ein Abzugswort steht
+                # und der errechnete Betrag dort auch tatsaechlich auftaucht.
+                # Ohne diese drei Bedingungen waere es Ratenmit zusaetzlichem
+                # Schritt - und wuerde einen echten Lesefehler zudecken.
+                # Der Betrag muss in DERSELBEN Zeile wie das Abzugswort stehen.
+                # Nur "kommt irgendwo im Beleg vor" genuegt nicht: In einem Test
+                # stand der errechnete Abzug von 100,00 zufaellig auch als
+                # Einzelpreis in der Positionszeile - die Pruefung haette den
+                # Rabatt dann auch ohne Rabattzeile eingesetzt.
+                if luecke > 0 and _abzugszeile(text, luecke):
+                    roh["rabatt"] = {"bezeichnung": "Rabatt", "betrag": str(luecke)}
+                    ergaenzt.append(
+                        f"Rabatt aus der Differenz ergänzt: {summe} - {netto} = {luecke} "
+                        "(Betrag steht so im Beleg)"
+                    )
+
+    return roh, ergaenzt
 
 
 def bessere_nach(rechnung: Rechnung, text: str) -> tuple[Rechnung, list[str]]:
