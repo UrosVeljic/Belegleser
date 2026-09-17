@@ -160,6 +160,71 @@ python -m pytest
 
 ---
 
+## Als Dienst
+
+```bash
+uvicorn belegleser.api:app --reload
+```
+
+Dann liegt unter **http://127.0.0.1:8000/docs** eine Oberfläche, in die man ein
+PDF hineinzieht und sieht, was herauskommt. Sie ist nicht gebaut, sondern
+entsteht aus dem Pydantic-Schema — die Dokumentation kann deshalb nicht
+veralten, sie *ist* der Code.
+
+```
+POST /belege                   Beleg abgeben
+GET  /belege/{id}              nachsehen, was daraus wurde
+GET  /warteschlange            was auf einen Menschen wartet
+POST /belege/{id}/freigeben    nach Sichtprüfung abschliessen
+GET  /kennzahlen               wie viel läuft, wie viel bleibt liegen
+GET  /gesundheit               ist der Dienst arbeitsfähig
+```
+
+`/gesundheit` prüft nicht nur, ob das Programm läuft, sondern ob das Modell
+erreichbar und geladen ist. Ohne das meldet der Dienst „gesund", während jeder
+Beleg in der Warteschlange landet — ein Ausfall, der von aussen wie Betrieb
+aussieht.
+
+Wer einen beanstandeten Beleg freigibt, wird festgehalten, und ob dabei Werte
+geändert wurden. Bei einem Beleg, der später auffällt, muss das nachvollziehbar
+sein.
+
+Das hochgeladene PDF wird nach dem Lesen gelöscht. Gespeichert werden die
+ausgelesenen Felder, nicht der Beleg.
+
+---
+
+## Was eine echte Rechnung gezeigt hat
+
+Die erste echte Rechnung im Dienst — eine Arztrechnung — scheiterte:
+
+```
+positionen.0.menge: Input should be a valid decimal
+```
+
+Das Modell hatte alles richtig gelesen. Die Rechnungsnummer, „6. August 2026"
+als `2026-08-06`, den Lieferanten, die Beträge, und sogar *„Umsatzsteuerfrei
+gemäß § 6 Abs. 1 Z 19 UStG"* als 0 %. Nur bei der Menge stand `""`.
+
+```
+    Leistung                                       Honorar
+  1 Hautkrebsvorsorge                            €  190,00
+```
+
+Keine Mengenspalte in der Kopfzeile, die Zahl steht **vor** der Bezeichnung.
+Meine erzeugten Belege haben immer eine Mengenspalte — viele
+Dienstleistungsrechnungen haben keine.
+
+**Der Fehler lag im Datenmodell, nicht beim Modell.** Dieselbe Sorte Annahme
+wie vorher bei den Steuersätzen. Die Menge ist jetzt optional und wird, wenn
+sie fehlt, aus Gesamtpreis ÷ Einzelpreis errechnet.
+
+Das ist das Argument dafür, echte Belege durchzuschicken, sobald es geht: Ein
+synthetischer Testsatz bestätigt die eigenen Annahmen. Ein fremder Beleg prüft
+sie.
+
+---
+
 ## Aufbau
 
 ```
@@ -170,6 +235,8 @@ belegleser/
   extraktion.py   PDF -> Text -> Modell -> Prüfung -> ok oder Warteschlange
   belegtreue.py   was rechnerisch feststeht, statt es zu glauben
   messung.py      Vergleich gegen die Sollwerte
+  ablage.py       Vorgänge in SQLite, damit die Warteschlange eine ist
+  api.py          HTTP-Schnittstelle
 messen.py         Testsatz erzeugen und messen
 ```
 
@@ -188,4 +255,8 @@ Ehrlichkeitshalber, weil das für die Einschätzung wichtiger ist als die 100 %:
 - **Rabatt bei mehreren Steuersätzen**: Der Abzug müsste auf die Sätze verteilt
   werden, und wie, steht auf echten Belegen selten dabei. Die Prüfung je Satz
   entfällt dann; die Summenprüfungen greifen weiter.
-- Es gibt **keine Schnittstelle** — das ist ein Skript, kein Dienst.
+- **Keine Texterkennung.** Der häufigste Grund, warum ein echter Beleg gar
+  nicht erst gelesen wird.
+- **Keine Anmeldung am Dienst.** Für einen Betrieb bräuchte es eine, und die
+  Ablage müsste von SQLite auf PostgreSQL wechseln, sobald mehrere Instanzen
+  gleichzeitig schreiben.
