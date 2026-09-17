@@ -96,12 +96,17 @@ Die Felder und wo sie üblicherweise stehen:
 - rechnungsnummer: beschriftet als "Rechnungsnummer", "Rechnungs-Nr.", "RE-Nr."
   oder "Beleg-Nr."
 - rechnungsdatum: beschriftet als "Rechnungsdatum", "Datum" oder "Belegdatum"
-- lieferant_name: der ausstellende Betrieb, meist ganz oben
-- lieferant_uid: die UID-Nummer des Lieferanten, beginnt mit ATU und steht
-  meist direkt unter dem Firmennamen. Nur auf null setzen, wenn im Beleg
-  wirklich keine steht.
+- lieferant_name: der Betrieb, der die Rechnung ausstellt. Achtung: Links oben
+  steht oft das Anschriftenfeld mit dem EMPFÄNGER. Der Aussteller steht im
+  Briefkopf oder in der Fußzeile, meist zusammen mit Firmenbuchnummer und UID.
+- lieferant_uid: die UID-Nummer des Lieferanten. Sie beginnt mit ATU und hat
+  danach genau acht Ziffern, etwa ATU47055001. Verwechsle sie nicht mit der
+  IBAN - die beginnt ebenfalls mit AT, ist aber viel länger und hat kein U.
+  Steht keine UID im Beleg, setz das Feld auf null.
 - positionen: die Zeilen der Leistungstabelle. Steht in der Tabelle eine
   USt-Spalte, gehört ihr Wert als ust_satz zur jeweiligen Zeile.
+  WICHTIG: gesamtpreis ist immer der NETTObetrag der Zeile. Führt der Beleg
+  beide Spalten - "Betrag netto" und "Betrag brutto" -, nimm die Nettospalte.
 - steuerzeilen: die Steueraufschlüsselung. Auf Belegen mit mehreren Sätzen
   steht sie als eigener Block ("netto 530,70  10 % USt  53,07"). Hat der Beleg
   nur einen Satz, gib trotzdem genau eine Steuerzeile zurück - mit dem

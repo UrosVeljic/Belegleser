@@ -139,6 +139,69 @@ def _abzugszeile(text: str, betrag: Decimal) -> bool:
     return False
 
 
+# Streng: genau ATU plus acht Ziffern, nichts davor oder dahinter. Dient dazu,
+# einen unbrauchbaren Wert zu erkennen - nicht dazu, ihn im Text zu finden.
+UID_MUSTER_STRENG = re.compile(r"^ATU\d{8}$")
+
+
+def _rechne_brutto_positionen_zurueck(roh: dict) -> tuple[dict, list[str]]:
+    """Wandelt Positionsbeträge von brutto auf netto, wenn die Zahlen es zeigen.
+
+    Bedingungen, alle drei müssen erfüllt sein:
+      - die Positionen ergeben in Summe den Bruttobetrag der Rechnung
+      - sie ergeben NICHT den Nettobetrag
+      - jede Position bringt ihren Steuersatz mit
+
+    Dann ist die Sache eindeutig: Es wurde die Bruttospalte gelesen, und
+    netto = brutto / (1 + Satz/100) ist eine Division, keine Vermutung. Fehlt
+    eine der Bedingungen, bleibt alles, wie es ist, und der Beleg geht in die
+    Warteschlange - das ist die richtige Antwort auf "unklar".
+    """
+    positionen = roh.get("positionen")
+    netto = _als_betrag(roh.get("nettobetrag"))
+    brutto = _als_betrag(roh.get("bruttobetrag"))
+    if not isinstance(positionen, list) or not positionen or netto is None or brutto is None:
+        return roh, []
+    if netto == brutto:
+        return roh, []
+
+    summe = Decimal("0")
+    saetze: list[Decimal | None] = []
+    for p in positionen:
+        if not isinstance(p, dict):
+            return roh, []
+        wert = _als_betrag(p.get("gesamtpreis"))
+        satz = _als_betrag(p.get("ust_satz"))
+        if wert is None or satz is None:
+            return roh, []
+        summe += wert
+        saetze.append(satz)
+
+    summe = summe.quantize(Decimal("0.01"))
+    if summe != brutto.quantize(Decimal("0.01")):
+        return roh, []
+
+    neue = []
+    for p, satz in zip(positionen, saetze):
+        faktor = Decimal("1") + satz / Decimal("100")
+        brutto_zeile = _als_betrag(p["gesamtpreis"])
+        netto_zeile = (brutto_zeile / faktor).quantize(Decimal("0.01"))
+        eintrag = dict(p)
+        eintrag["gesamtpreis"] = str(netto_zeile)
+        # Der Einzelpreis muss mit, sonst geht die Zeilenpruefung nicht mehr auf.
+        einzel = _als_betrag(p.get("einzelpreis"))
+        if einzel is not None and einzel == brutto_zeile:
+            eintrag["einzelpreis"] = str(netto_zeile)
+        neue.append(eintrag)
+
+    roh = dict(roh)
+    roh["positionen"] = neue
+    return roh, [
+        f"Positionen waren Bruttobeträge (Summe {summe} = Rechnungsbrutto). "
+        "Auf netto zurückgerechnet."
+    ]
+
+
 def vorbessere(roh: dict, text: str) -> tuple[dict, list[str]]:
     """Repariert den Rohdatensatz, bevor er geprüft wird.
 
@@ -154,7 +217,32 @@ def vorbessere(roh: dict, text: str) -> tuple[dict, list[str]]:
     ergaenzt: list[str] = []
     roh = dict(roh)
 
-    # 1) "Kein Rabatt" als Betrag null statt als fehlendes Feld.
+    # 0) Als UID etwas gelesen, das keine ist.
+    #
+    # Beobachtet: "AT474300045101844020" - das ist eine IBAN. Beide beginnen mit
+    # AT, deshalb die Verwechslung. Die Formatpruefung faengt das zwar, wirft
+    # aber den ganzen Beleg in die Warteschlange, obwohl die richtige UID im
+    # selben Text steht. Also hier entfernen; die Musterersuche weiter unten
+    # setzt dann die echte ein.
+    uid = roh.get("lieferant_uid")
+    if isinstance(uid, str) and uid.strip():
+        if not UID_MUSTER_STRENG.match(uid.replace(" ", "").upper()):
+            roh.pop("lieferant_uid")
+            ergaenzt.append(
+                f"'{uid}' als UID verworfen - passt nicht auf ATU + 8 Ziffern "
+                "(häufig wird die IBAN verwechselt)"
+            )
+
+    # 1) Positionen mit Bruttobetraegen statt Nettobetraegen.
+    #
+    # Endkundenrechnungen fuehren beide Spalten. Nimmt das Modell die falsche,
+    # ergeben die Positionen den Bruttobetrag der Rechnung statt des
+    # Nettobetrags - und genau daran ist es erkennbar. Dann laesst sich pro
+    # Zeile zurueckrechnen: netto = brutto / (1 + Satz/100).
+    roh, umgerechnet = _rechne_brutto_positionen_zurueck(roh)
+    ergaenzt.extend(umgerechnet)
+
+    # 2) "Kein Rabatt" als Betrag null statt als fehlendes Feld.
     rabatt = roh.get("rabatt")
     if isinstance(rabatt, dict):
         betrag = _als_betrag(rabatt.get("betrag"))

@@ -317,3 +317,80 @@ def test_skonto_gilt_nicht_als_abzug():
     text = RABATT_TEXT.replace("Rabatt 10 %      -100,00", "3 % Skonto binnen 14 Tagen")
     ergebnis = verarbeite_text(text, attrappe_mit(RABATT_ANTWORT))
     assert ergebnis.braucht_pruefung
+
+
+# --- Befunde aus echten Rechnungen -----------------------------------------
+
+
+def test_iban_wird_nicht_als_uid_uebernommen():
+    """Beobachtet: Das Modell lieferte 'AT474300045101844020' als UID - das ist
+    eine IBAN. Beide beginnen mit AT.
+
+    Vorher warf die Formatpruefung den ganzen Beleg in die Warteschlange,
+    obwohl die richtige UID im selben Text stand.
+    """
+    daten = dict(GUTE_ANTWORT, lieferant_uid="AT474300045101844020")
+    ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(daten))
+
+    assert ergebnis.status == "ok"
+    assert ergebnis.rechnung.lieferant_uid == "ATU12345678"
+    assert any("als UID verworfen" in e for e in ergebnis.ergaenzungen)
+
+
+BRUTTO_TEXT = (
+    "Wiener Linien GmbH & Co KG\n"
+    "UID-Nr. ATU47055001\n"
+    "Rechnungsnummer: 20260000025088\n"
+    "Menge Bezeichnung      Betrag netto  USt in %  USt in EUR  Betrag brutto\n"
+    "  1   Jahreskarte           424,55     10,00      42,45         467,00\n"
+    "Rechnungsbetrag netto 424,55\n"
+    "USt 42,45\n"
+    "Rechnungsbetrag brutto 467,00"
+)
+
+BRUTTO_ANTWORT = {
+    "rechnungsnummer": "20260000025088",
+    "rechnungsdatum": "2026-02-09",
+    "lieferant_name": "Wiener Linien GmbH & Co KG",
+    "lieferant_uid": "ATU47055001",
+    # Das Modell hat die Bruttospalte genommen:
+    "positionen": [
+        {"bezeichnung": "Jahreskarte", "menge": 1, "einzelpreis": 467.00,
+         "gesamtpreis": 467.00, "ust_satz": 10}
+    ],
+    "steuerzeilen": [{"satz": 10, "nettobetrag": 424.55, "ust_betrag": 42.45}],
+    "nettobetrag": 424.55,
+    "ust_betrag": 42.45,
+    "bruttobetrag": 467.00,
+}
+
+
+def test_bruttopositionen_werden_zurueckgerechnet():
+    """Endkundenrechnungen fuehren beide Spalten. Nimmt das Modell die falsche,
+    ergeben die Positionen den Bruttobetrag der Rechnung - daran ist es
+    erkennbar, und netto = brutto / (1 + Satz/100) ist eine Division."""
+    ergebnis = verarbeite_text(BRUTTO_TEXT, attrappe_mit(BRUTTO_ANTWORT))
+
+    assert ergebnis.status == "ok"
+    assert str(ergebnis.rechnung.positionen[0].gesamtpreis) == "424.55"
+    assert any("Bruttobeträge" in e for e in ergebnis.ergaenzungen)
+
+
+def test_ohne_steuersatz_wird_nicht_zurueckgerechnet():
+    """Gegenprobe: Ohne Satz je Position ist die Umrechnung nicht eindeutig.
+    Dann gehoert der Beleg in die Warteschlange, nicht zurechtgebogen."""
+    ohne_satz = dict(BRUTTO_ANTWORT)
+    ohne_satz["positionen"] = [
+        {k: v for k, v in p.items() if k != "ust_satz"} for p in BRUTTO_ANTWORT["positionen"]
+    ]
+    ergebnis = verarbeite_text(BRUTTO_TEXT, attrappe_mit(ohne_satz))
+    assert ergebnis.braucht_pruefung
+
+
+def test_stimmige_nettopositionen_bleiben_unberuehrt():
+    """Zweite Gegenprobe: Wo die Positionen bereits netto sind, darf nichts
+    umgerechnet werden."""
+    ergebnis = verarbeite_text(BELEGTEXT, attrappe_mit(GUTE_ANTWORT))
+    assert ergebnis.status == "ok"
+    assert str(ergebnis.rechnung.positionen[0].gesamtpreis) == "300.0"
+    assert not any("Bruttobeträge" in e for e in ergebnis.ergaenzungen)
