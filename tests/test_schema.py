@@ -281,3 +281,74 @@ def test_skonto_aendert_die_summen_nicht():
     r = Rechnung(**mit_rabatt(skonto={"prozent": "3", "tage": "14"}))
     assert r.bruttobetrag == Decimal("1080.00")
     assert r.skonto.tage == 14
+
+
+# --- Rechnungen ohne Mengenspalte ------------------------------------------
+# Aus der ersten echten Rechnung, die durch den Dienst lief: eine Arztrechnung.
+#
+#     Leistung                                       Honorar
+#   1 Hautkrebsvorsorge                            EUR 190,00
+#
+# Keine Mengenspalte in der Kopfzeile, die Zahl steht vor der Bezeichnung. Das
+# Modell lieferte menge: "" - und die Schemapruefung brach ab, obwohl alles
+# andere richtig war, bis hin zu "Umsatzsteuerfrei" als 0 Prozent.
+
+
+def arztrechnung(**abweichungen):
+    grund = dict(
+        rechnungsnummer="PA2026-01590",
+        rechnungsdatum="2026-08-06",
+        lieferant_name="Dr. Alica Pistekova",
+        positionen=[
+            {"bezeichnung": "Hautkrebsvorsorge", "einzelpreis": "190.00",
+             "gesamtpreis": "190.00"},
+        ],
+        steuerzeilen=[{"satz": "0", "nettobetrag": "190.00", "ust_betrag": "0.00"}],
+        nettobetrag="190.00",
+        ust_betrag="0.00",
+        bruttobetrag="190.00",
+    )
+    grund.update(abweichungen)
+    return grund
+
+
+def test_position_ohne_menge_geht_durch():
+    r = Rechnung(**arztrechnung())
+    assert r.positionen[0].menge == Decimal("1")
+
+
+def test_leere_menge_zaehlt_als_fehlend():
+    """Ein Modell, das ein Feld nicht fuellen kann, schreibt "". Das heisst
+    "nichts gefunden", nicht "ungueltig"."""
+    r = Rechnung(**arztrechnung(
+        positionen=[{"bezeichnung": "Hautkrebsvorsorge", "menge": "",
+                     "einzelpreis": "190.00", "gesamtpreis": "190.00"}]
+    ))
+    assert r.positionen[0].menge == Decimal("1")
+
+
+def test_fehlende_menge_wird_errechnet():
+    """3 x 50 = 150 - die Menge ergibt sich aus der Division, nicht aus einer
+    Annahme."""
+    r = Rechnung(**arztrechnung(
+        positionen=[{"bezeichnung": "Sitzung", "einzelpreis": "50.00",
+                     "gesamtpreis": "150.00"}],
+        steuerzeilen=[{"satz": "0", "nettobetrag": "150.00", "ust_betrag": "0.00"}],
+        nettobetrag="150.00", ust_betrag="0.00", bruttobetrag="150.00",
+    ))
+    assert r.positionen[0].menge == Decimal("3")
+
+
+def test_umsatzsteuerfreie_rechnung_geht_durch():
+    """Arzt- und Versicherungsleistungen sind nach Paragraph 6 UStG steuerfrei.
+    0 Prozent ist ein gueltiger Satz, kein fehlender Wert."""
+    r = Rechnung(**arztrechnung())
+    assert r.ust_betrag == Decimal("0.00")
+    assert r.ust_saetze == [Decimal("0")]
+
+
+def test_zeilenpruefung_greift_weiterhin_wenn_die_menge_dasteht():
+    """Gegenprobe: Die Lockerung darf die Pruefung nicht aushebeln."""
+    with pytest.raises(ValidationError, match="ergibt"):
+        Position(bezeichnung="Sitzung", menge="2", einzelpreis="50.00",
+                 gesamtpreis="150.00")

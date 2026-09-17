@@ -70,7 +70,10 @@ def deutsche_zahl(wert: object) -> object:
 
     text = wert.strip().replace("\u00a0", "").replace(" ", "")
     if not text:
-        return wert
+        # Ein Modell, das ein Feld nicht fuellen kann, schreibt eine leere
+        # Zeichenkette. Das heisst "nichts gefunden" - nicht "ungueltig".
+        # Als None laesst sich damit weiterarbeiten, als "" nicht.
+        return None
     text = text.removeprefix("EUR").removeprefix("\u20ac").strip()
 
     if "," in text:
@@ -83,12 +86,21 @@ def deutsche_zahl(wert: object) -> object:
 # Ein Decimal, das auch deutsche Schreibweise entgegennimmt.
 Betrag = Annotated[Decimal, BeforeValidator(deutsche_zahl)]
 
+# Fuer Felder, die fehlen duerfen. Wichtig ist, dass die Umwandlung VOR der
+# Vereinigung steht und nicht in einem ihrer Zweige: Schriebe man
+# `Betrag | None`, liefe die Umwandlung innerhalb von `Betrag`, gaebe bei
+# leerem Text None zurueck - und die Decimal-Pruefung dieses Zweigs wuerde
+# daran scheitern, bevor der None-Zweig ueberhaupt geprueft wird.
+BetragOderNichts = Annotated[Decimal | None, BeforeValidator(deutsche_zahl)]
+
 
 class Position(BaseModel):
     """Eine einzelne Zeile auf der Rechnung."""
 
     bezeichnung: str = Field(min_length=1)
-    menge: Betrag = Field(gt=0)
+    # Optional. Dienstleistungsrechnungen fuehren oft gar keine Mengenspalte -
+    # "Hautkrebsvorsorge  190,00" ist eine vollstaendige Zeile.
+    menge: BetragOderNichts = Field(default=None, gt=0)
     einzelpreis: Betrag = Field(ge=0)
     gesamtpreis: Betrag = Field(ge=0)
     # Der Satz, der für diese Zeile gilt. Auf Belegen mit nur einem Satz steht
@@ -98,6 +110,25 @@ class Position(BaseModel):
 
     @model_validator(mode="after")
     def zeile_rechnet_auf(self) -> Position:
+        """Prüft die Zeile - und leitet die Menge her, wenn sie fehlt.
+
+        Fehlt die Menge, ergibt sie sich aus Gesamtpreis geteilt durch
+        Einzelpreis. Das ist keine Annahme, sondern eine Division. Geht sie
+        nicht auf oder fehlen die Preise, bleibt das Feld leer und die Prüfung
+        entfällt - die Summenprüfungen der Rechnung greifen weiterhin.
+        """
+        if self.menge is None:
+            if self.einzelpreis > 0:
+                hergeleitet = (self.gesamtpreis / self.einzelpreis).quantize(
+                    Decimal("0.001")
+                )
+                if hergeleitet > 0:
+                    # Ohne Aenderungsschutz koennte man hier nicht zuweisen:
+                    # Pydantic-Modelle sind nach der Pruefung schreibbar, aber
+                    # object.__setattr__ umgeht auch kuenftige Sperren.
+                    object.__setattr__(self, "menge", hergeleitet)
+            return self
+
         erwartet = (self.menge * self.einzelpreis).quantize(CENT)
         if abs(erwartet - self.gesamtpreis.quantize(CENT)) > CENT:
             raise ValueError(
