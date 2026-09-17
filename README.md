@@ -136,7 +136,7 @@ Man braucht Python 3.11 oder neuer und [Ollama](https://ollama.com/download).
 
 ```bash
 git clone https://github.com/UrosVeljic/Belegleser.git
-cd belegleser
+cd Belegleser
 
 python -m venv .venv
 .venv/Scripts/activate          # unter Linux/macOS: source .venv/bin/activate
