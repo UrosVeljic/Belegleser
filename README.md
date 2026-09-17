@@ -135,7 +135,7 @@ aufruft, ist kein Test, sondern ein Experiment mit wechselndem Ausgang.
 Man braucht Python 3.11 oder neuer und [Ollama](https://ollama.com/download).
 
 ```bash
-git clone https://github.com/UrosVeljic/belegleser.git
+git clone https://github.com/UrosVeljic/Belegleser.git
 cd belegleser
 
 python -m venv .venv
